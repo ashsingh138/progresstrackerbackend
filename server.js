@@ -1,153 +1,307 @@
+// server.js
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
+const morgan = require('morgan');
 
-const User = require('./models/User');
-const Target = require('./models/Target');
+// Models (assuming these files exist in project root / same folder)
+const Target = require('./Target');
+const User = require('./User');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(morgan('tiny')); // optional but useful for debugging
 
-const JWT_SECRET = process.env.JWT_SECRET || 'secret_key_123';
+// Config
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/targetflow';
+const JWT_SECRET = process.env.JWT_SECRET || 'change_this_in_prod';
+const PORT = process.env.PORT || 5000;
 
-// --- MIDDLEWARE ---
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
+// Connect to MongoDB
+mongoose
+  .connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+  .then(() => console.log('✅ MongoDB connected'))
+  .catch((err) => {
+    console.error('❌ MongoDB connection error:', err);
+    process.exit(1);
+  });
+
+/**
+ * Middleware: authenticateToken
+ * Expects Authorization: Bearer <token>
+ * Attaches req.user = { id: <userId> } when valid
+ */
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'] || req.headers['Authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.status(401).json({ error: "Access Denied" });
+  if (!token) return res.status(401).json({ error: 'Missing auth token' });
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: "Invalid Token" });
-    req.user = user;
+  jwt.verify(token, JWT_SECRET, (err, payload) => {
+    if (err) return res.status(401).json({ error: 'Invalid token' });
+    req.user = { id: payload.id, email: payload.email };
     next();
   });
-};
+}
 
-// Connect DB
-mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/targetflow')
-  .then(() => console.log("✅ MongoDB Connected"))
-  .catch(err => console.error(err));
+/**
+ * Middleware: validateObjectIds
+ * Validates params.id and params.logId if present
+ */
+function validateObjectIds(req, res, next) {
+  const { id, logId } = req.params;
+  if (id && !mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ error: 'Invalid target id' });
+  }
+  if (logId && !mongoose.Types.ObjectId.isValid(logId)) {
+    return res.status(400).json({ error: 'Invalid log id' });
+  }
+  next();
+}
 
-// --- AUTH ROUTES ---
+/* ========================
+   AUTH ROUTES
+   POST /api/auth/signup
+   POST /api/auth/login
+   ======================== */
 
-// Signup
 app.post('/api/auth/signup', async (req, res) => {
   try {
     const { name, email, password, age, place, gender, studentClass, collegeName } = req.body;
-    const existingUser = await User.findOne({ email });
-    if (existingUser) return res.status(400).json({ error: "Email already exists" });
+    if (!email || !password || !name) {
+      return res.status(400).json({ error: 'name, email and password are required' });
+    }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const user = new User({ name, email, password: hashedPassword, age, place, gender, studentClass, collegeName });
+    const existing = await User.findOne({ email: email.toLowerCase() });
+    if (existing) return res.status(409).json({ error: 'Email already registered' });
+
+    const saltRounds = 10;
+    const hashed = await bcrypt.hash(password, saltRounds);
+
+    const user = new User({
+      name,
+      email: email.toLowerCase(),
+      password: hashed,
+      age,
+      place,
+      gender,
+      studentClass,
+      collegeName
+    });
+
     await user.save();
 
-    const token = jwt.sign({ id: user._id, name: user.name }, JWT_SECRET);
-    const userObj = user.toObject();
-    delete userObj.password;
-    res.json({ token, user: userObj });
+    const token = jwt.sign({ id: user._id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
+
+    // don't send password back
+    const userOut = {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      age: user.age,
+      place: user.place,
+      gender: user.gender,
+      studentClass: user.studentClass,
+      collegeName: user.collegeName
+    };
+
+    return res.status(201).json({ token, user: userOut });
   } catch (err) {
-    res.status(400).json({ error: "Error creating user" });
+    console.error('signup error:', err);
+    return res.status(500).json({ error: 'Server error during signup' });
   }
 });
 
-// Login
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const user = await User.findOne({ email });
-    if (!user) return res.status(400).json({ error: "User not found" });
+    if (!email || !password) return res.status(400).json({ error: 'email and password required' });
 
-    const validPass = await bcrypt.compare(password, user.password);
-    if (!validPass) return res.status(400).json({ error: "Invalid password" });
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const token = jwt.sign({ id: user._id, name: user.name }, JWT_SECRET);
-    const userObj = user.toObject();
-    delete userObj.password;
-    
-    res.json({ token, user: userObj });
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) return res.status(401).json({ error: 'Invalid credentials' });
+
+    const token = jwt.sign({ id: user._id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
+
+    const userOut = {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      age: user.age,
+      place: user.place,
+      gender: user.gender,
+      studentClass: user.studentClass,
+      collegeName: user.collegeName
+    };
+
+    return res.json({ token, user: userOut });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('login error:', err);
+    return res.status(500).json({ error: 'Server error during login' });
   }
 });
 
-// UPDATE PROFILE (The Route You Were Missing)
-app.patch('/api/auth/profile', authenticateToken, async (req, res) => {
+/* ==============
+   USER ROUTE
+   ============== */
+app.get('/api/me', authenticateToken, async (req, res) => {
   try {
-    const { name, age, place, gender, studentClass, collegeName } = req.body;
-    
-    const updatedUser = await User.findByIdAndUpdate(
-      req.user.id,
-      { name, age, place, gender, studentClass, collegeName },
-      { new: true }
-    ).select('-password');
-
-    if (!updatedUser) return res.status(404).json({ error: "User not found" });
-
-    res.json(updatedUser);
+    const user = await User.findById(req.user.id).select('-password');
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json(user);
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error('/api/me error:', err);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
-// --- DATA ROUTES (Protected) ---
+/* ========================
+   TARGETS + LOGS ROUTES
+   Protected by authenticateToken
+   ======================== */
 
+// GET all targets for user
 app.get('/api/targets', authenticateToken, async (req, res) => {
-  const targets = await Target.find({ user: req.user.id }).sort({ isPinned: -1, dueDate: 1 });
-  res.json(targets);
+  try {
+    const targets = await Target.find({ user: req.user.id }).sort({ isPinned: -1, dueDate: 1 });
+    res.json(targets);
+  } catch (err) {
+    console.error('GET /api/targets error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
+// CREATE a target
 app.post('/api/targets', authenticateToken, async (req, res) => {
   try {
-    const newTarget = new Target({ ...req.body, user: req.user.id });
-    const saved = await newTarget.save();
-    res.json(saved);
-  } catch (err) { res.status(400).json({ error: err.message }); }
-});
-
-app.patch('/api/targets/:id', authenticateToken, async (req, res) => {
-  const updated = await Target.findOneAndUpdate({ _id: req.params.id, user: req.user.id }, req.body, { new: true });
-  res.json(updated);
-});
-
-app.delete('/api/targets/:id', authenticateToken, async (req, res) => {
-  await Target.findOneAndDelete({ _id: req.params.id, user: req.user.id });
-  res.json({ message: 'Deleted' });
-});
-
-// Logs
-app.post('/api/targets/:id/logs', authenticateToken, async (req, res) => {
-  const target = await Target.findOne({ _id: req.params.id, user: req.user.id });
-  if (!target) return res.status(404).json({ error: "Not found" });
-  target.logs.push(req.body);
-  await target.save();
-  res.json(target);
-});
-
-app.put('/api/targets/:id/logs/:logId', authenticateToken, async (req, res) => {
-  const target = await Target.findOne({ _id: req.params.id, user: req.user.id });
-  if (!target) return res.status(404).json({ error: "Not found" });
-  const log = target.logs.id(req.params.logId);
-  if(log) {
-    if(req.body.completed !== undefined) log.completed = req.body.completed;
-    if(req.body.planned !== undefined) log.planned = req.body.planned;
-    if(req.body.date) log.date = req.body.date;
-    if(req.body.note !== undefined) log.note = req.body.note;
-    await target.save();
+    // server ensures the owner is the authenticated user
+    const payload = { ...req.body, user: req.user.id };
+    const target = new Target(payload);
+    const saved = await target.save();
+    res.status(201).json(saved);
+  } catch (err) {
+    console.error('POST /api/targets error:', err);
+    res.status(400).json({ error: err.message || 'Invalid data' });
   }
-  res.json(target);
 });
 
-app.delete('/api/targets/:id/logs/:logId', authenticateToken, async (req, res) => {
-  const target = await Target.findOne({ _id: req.params.id, user: req.user.id });
-  if (!target) return res.status(404).json({ error: "Not found" });
-  target.logs.pull(req.params.logId);
-  await target.save();
-  res.json(target);
+// UPDATE a target
+app.patch('/api/targets/:id', authenticateToken, validateObjectIds, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updated = await Target.findOneAndUpdate(
+      { _id: id, user: req.user.id },
+      { $set: req.body },
+      { new: true, runValidators: true }
+    );
+    if (!updated) return res.status(404).json({ error: 'Target not found or not owned by you' });
+    res.json(updated);
+  } catch (err) {
+    console.error('PATCH /api/targets/:id error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
-const PORT = 5000;
+// DELETE a target
+app.delete('/api/targets/:id', authenticateToken, validateObjectIds, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deleted = await Target.findOneAndDelete({ _id: id, user: req.user.id });
+    if (!deleted) return res.status(404).json({ error: 'Target not found or not owned by you' });
+    res.json({ message: 'Deleted' });
+  } catch (err) {
+    console.error('DELETE /api/targets/:id error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+/* ===== Logs endpoints ====== */
+
+// Add a log to a target
+app.post('/api/targets/:id/logs', authenticateToken, validateObjectIds, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const target = await Target.findOne({ _id: id, user: req.user.id });
+    if (!target) return res.status(404).json({ error: 'Target not found or not owned by you' });
+
+    // Basic validation of log shape - adapt as per your schema
+    const log = {
+      date: req.body.date || new Date(),
+      planned: req.body.planned || '',
+      completed: req.body.completed || '',
+      note: req.body.note || ''
+    };
+
+    target.logs.push(log);
+    await target.save();
+    res.status(201).json(target);
+  } catch (err) {
+    console.error('POST /api/targets/:id/logs error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Update a log
+app.put('/api/targets/:id/logs/:logId', authenticateToken, validateObjectIds, async (req, res) => {
+  try {
+    const { id, logId } = req.params;
+    const target = await Target.findOne({ _id: id, user: req.user.id });
+    if (!target) return res.status(404).json({ error: 'Target not found or not owned by you' });
+
+    const log = target.logs.id(logId);
+    if (!log) return res.status(404).json({ error: 'Log not found' });
+
+    // Update allowed fields only
+    if (req.body.date !== undefined) log.date = req.body.date;
+    if (req.body.planned !== undefined) log.planned = req.body.planned;
+    if (req.body.completed !== undefined) log.completed = req.body.completed;
+    if (req.body.note !== undefined) log.note = req.body.note;
+
+    await target.save();
+    res.json(target);
+  } catch (err) {
+    console.error('PUT /api/targets/:id/logs/:logId error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Delete a log
+app.delete('/api/targets/:id/logs/:logId', authenticateToken, validateObjectIds, async (req, res) => {
+  try {
+    const { id, logId } = req.params;
+    const target = await Target.findOne({ _id: id, user: req.user.id });
+    if (!target) return res.status(404).json({ error: 'Target not found or not owned by you' });
+
+    const log = target.logs.id(logId);
+    if (!log) return res.status(404).json({ error: 'Log not found' });
+
+    target.logs.pull(logId);
+    await target.save();
+    res.json(target);
+  } catch (err) {
+    console.error('DELETE /api/targets/:id/logs/:logId error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+/* ==============
+   Generic 404 + error handler
+   ============== */
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+/* ==============
+   Start server (Render-friendly)
+   ============== */
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
