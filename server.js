@@ -74,7 +74,7 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// UPDATE PROFILE (The Route You Were Missing)
+// UPDATE PROFILE
 app.patch('/api/auth/profile', authenticateToken, async (req, res) => {
   try {
     const { name, age, place, gender, studentClass, collegeName } = req.body;
@@ -93,11 +93,15 @@ app.patch('/api/auth/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// --- DATA ROUTES (Protected) ---
+// --- TARGET DATA ROUTES (Protected) ---
 
 app.get('/api/targets', authenticateToken, async (req, res) => {
-  const targets = await Target.find({ user: req.user.id }).sort({ isPinned: -1, dueDate: 1 });
-  res.json(targets);
+  try {
+    const targets = await Target.find({ user: req.user.id }).sort({ isPinned: -1, dueDate: 1 });
+    res.json(targets);
+  } catch (err) {
+    res.status(500).json({ error: "Error fetching targets" });
+  }
 });
 
 app.post('/api/targets', authenticateToken, async (req, res) => {
@@ -109,44 +113,86 @@ app.post('/api/targets', authenticateToken, async (req, res) => {
 });
 
 app.patch('/api/targets/:id', authenticateToken, async (req, res) => {
-  const updated = await Target.findOneAndUpdate({ _id: req.params.id, user: req.user.id }, req.body, { new: true });
-  res.json(updated);
+  try {
+    const updated = await Target.findOneAndUpdate({ _id: req.params.id, user: req.user.id }, req.body, { new: true });
+    if (!updated) return res.status(404).json({ error: "Target not found" });
+    res.json(updated);
+  } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 app.delete('/api/targets/:id', authenticateToken, async (req, res) => {
-  await Target.findOneAndDelete({ _id: req.params.id, user: req.user.id });
-  res.json({ message: 'Deleted' });
+  try {
+    await Target.findOneAndDelete({ _id: req.params.id, user: req.user.id });
+    res.json({ message: 'Deleted' });
+  } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
-// Logs
+// --- LOG ROUTES (Fixed with Try/Catch) ---
+
+// Add Log
 app.post('/api/targets/:id/logs', authenticateToken, async (req, res) => {
-  const target = await Target.findOne({ _id: req.params.id, user: req.user.id });
-  if (!target) return res.status(404).json({ error: "Not found" });
-  target.logs.push(req.body);
-  await target.save();
-  res.json(target);
-});
+  try {
+    // Validate ID format prevents CastError crash
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: "Invalid Target ID" });
+    }
 
-app.put('/api/targets/:id/logs/:logId', authenticateToken, async (req, res) => {
-  const target = await Target.findOne({ _id: req.params.id, user: req.user.id });
-  if (!target) return res.status(404).json({ error: "Not found" });
-  const log = target.logs.id(req.params.logId);
-  if(log) {
-    if(req.body.completed !== undefined) log.completed = req.body.completed;
-    if(req.body.planned !== undefined) log.planned = req.body.planned;
-    if(req.body.date) log.date = req.body.date;
-    if(req.body.note !== undefined) log.note = req.body.note;
+    const target = await Target.findOne({ _id: req.params.id, user: req.user.id });
+    if (!target) return res.status(404).json({ error: "Target not found" });
+    
+    target.logs.push(req.body);
     await target.save();
+    res.json(target);
+  } catch (err) {
+    console.error("Add Log Error:", err);
+    res.status(500).json({ error: "Server error while adding log" });
   }
-  res.json(target);
 });
 
+// Edit Log
+app.put('/api/targets/:id/logs/:logId', authenticateToken, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: "Invalid Target ID" });
+    }
+
+    const target = await Target.findOne({ _id: req.params.id, user: req.user.id });
+    if (!target) return res.status(404).json({ error: "Target not found" });
+    
+    const log = target.logs.id(req.params.logId);
+    if(log) {
+      if(req.body.completed !== undefined) log.completed = req.body.completed;
+      if(req.body.planned !== undefined) log.planned = req.body.planned;
+      if(req.body.date) log.date = req.body.date;
+      if(req.body.note !== undefined) log.note = req.body.note;
+      await target.save();
+    } else {
+      return res.status(404).json({ error: "Log entry not found" });
+    }
+    res.json(target);
+  } catch (err) {
+    console.error("Edit Log Error:", err);
+    res.status(500).json({ error: "Server error while editing log" });
+  }
+});
+
+// Delete Log
 app.delete('/api/targets/:id/logs/:logId', authenticateToken, async (req, res) => {
-  const target = await Target.findOne({ _id: req.params.id, user: req.user.id });
-  if (!target) return res.status(404).json({ error: "Not found" });
-  target.logs.pull(req.params.logId);
-  await target.save();
-  res.json(target);
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: "Invalid Target ID" });
+    }
+
+    const target = await Target.findOne({ _id: req.params.id, user: req.user.id });
+    if (!target) return res.status(404).json({ error: "Target not found" });
+    
+    target.logs.pull(req.params.logId);
+    await target.save();
+    res.json(target);
+  } catch (err) {
+    console.error("Delete Log Error:", err);
+    res.status(500).json({ error: "Server error while deleting log" });
+  }
 });
 
 const PORT = 5000;
