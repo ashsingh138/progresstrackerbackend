@@ -8,8 +8,8 @@ const jwt = require('jsonwebtoken');
 const morgan = require('morgan');
 
 // Models (assuming these files exist in project root / same folder)
-const Target = require('.models/Target');
-const User = require('.models/User');
+const Target = require('./models/Target');
+const User = require('./models/User');
 
 const app = express();
 app.use(cors());
